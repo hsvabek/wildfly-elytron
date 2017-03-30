@@ -18,6 +18,10 @@
 package org.wildfly.security.credential.store;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.NoSuchAlgorithmException;
 import java.security.Provider;
 import java.security.Security;
@@ -26,8 +30,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang.SystemUtils;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.wildfly.security.WildFlyElytronProvider;
@@ -45,17 +51,16 @@ import org.wildfly.security.password.spec.ClearPasswordSpec;
  * @author <a href="mailto:pskopek@redhat.com">Peter Skopek</a>,
  *         <a href="mailto:hsvabek@redhat.com">Hynek Svabek</a>.
  */
-public class KeystorePasswordStoreTest {
+public class KeystorePasswordStoreTest extends AbstractCredentialStoreTest {
 
     private static final Provider provider = new WildFlyElytronProvider();
 
-    private static Map<String, String> stores = new HashMap<>();
     private static String BASE_STORE_DIRECTORY = "target/ks-cred-stores";
+    private static Map<String, String> stores = new HashMap<>();
     static {
         stores.put("ONE", BASE_STORE_DIRECTORY + "/keystore1.jceks");
         stores.put("TWO", BASE_STORE_DIRECTORY + "/keystore2.jceks");
         stores.put("THREE", BASE_STORE_DIRECTORY + "/keystore3.jceks");
-        stores.put("TO_DELETE", BASE_STORE_DIRECTORY + "/keystore4.jceks");
     }
 
     /**
@@ -123,12 +128,6 @@ public class KeystorePasswordStoreTest {
                 .addPassword("db-pass-4", "4-secret-info")
                 .addPassword("db-pass-5", "5-secret-info")
                 .build();
-        CredentialStoreBuilder.get().setKeyStoreFile(stores.get("TO_DELETE"))
-                .setKeyStorePassword("secret_store_DELETE")
-                .addPassword("alias1", "secret-password-1")
-                .addPassword("alias2", "secret-password-2")
-                .build();
-
     }
 
     /**
@@ -146,22 +145,22 @@ public class KeystorePasswordStoreTest {
      * @throws NoSuchAlgorithmException
      * @throws CredentialStoreException
      * @throws UnsupportedCredentialTypeException
+     * @throws IOException
      */
     @Test
     public void testRecreatingKSTest()
-        throws NoSuchAlgorithmException, CredentialStoreException, UnsupportedCredentialTypeException {
+        throws NoSuchAlgorithmException, CredentialStoreException, UnsupportedCredentialTypeException, IOException {
 
-        File ks = new File(stores.get("TO_DELETE"));
-        if (!ks.exists()) {
-            Assert.fail("KeyStore must exists!");
-        }
+        Path ksPath = Paths.get(BASE_STORE_DIRECTORY, "ks.jceks");
+        String storePassword = "storePassword";
+        createAndCheckCredentialStoreStorageFile(ksPath, storePassword);
 
         char[] password1 = "secret-password1".toCharArray();
         char[] password2 = "secret-password2".toCharArray();
 
         HashMap<String, String> csAttributes = new HashMap<>();
 
-        csAttributes.put("location", stores.get("TO_DELETE"));
+        csAttributes.put("location", ksPath.toAbsolutePath().toString());
         csAttributes.put("keyStoreType", "JCEKS");
 
         String passwordAlias1 = "passAlias1";
@@ -171,15 +170,15 @@ public class KeystorePasswordStoreTest {
         cs.initialize(csAttributes,
             new CredentialStore.CredentialSourceProtectionParameter(
                 IdentityCredentials.NONE.withCredential(new PasswordCredential(
-                    ClearPassword.createRaw(ClearPassword.ALGORITHM_CLEAR, "secret_store_DELETE".toCharArray())))));
+                    ClearPassword.createRaw(ClearPassword.ALGORITHM_CLEAR, storePassword.toCharArray())))));
 
         cs.store(passwordAlias1, createCredentialFromPassword(password1));
         cs.store(passwordAlias2, createCredentialFromPassword(password2));
 
         Assert.assertArrayEquals(password1, getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
 
-        if (!ks.delete()) {
-            Assert.fail("KeyStore [" + ks.getAbsolutePath() + "] delete fail");
+        if (!Files.deleteIfExists(ksPath)) {
+            Assert.fail("KeyStore [" + ksPath.toAbsolutePath() + "] delete fail");
         }
 
         Assert.assertArrayEquals(password1, getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
@@ -188,8 +187,8 @@ public class KeystorePasswordStoreTest {
 
         cs.store("abc", createCredentialFromPassword(password1));
         cs.flush();
-        if (!ks.exists()) {
-            Assert.fail("KeyStore [" + ks.getAbsolutePath() + "] must exist yet.");
+        if (!Files.exists(ksPath)) {
+            Assert.fail("KeyStore [" + ksPath.toAbsolutePath() + "] must exist yet.");
         }
     }
 
@@ -296,6 +295,180 @@ public class KeystorePasswordStoreTest {
             getPasswordFromCredential(cs.retrieve(caseSensitive2, PasswordCredential.class)));
         Assert.assertArrayEquals(newPassword2,
             getPasswordFromCredential(cs.retrieve(caseSensitive1.toLowerCase(), PasswordCredential.class)));
+    }
+
+    /**
+     * After initialize Credential Store is removed write permission on folder in which is stored CS file.
+     *
+     * @throws NoSuchAlgorithmException
+     * @throws CredentialStoreException
+     * @throws UnsupportedCredentialTypeException
+     * @throws IOException
+     */
+    @Test
+    public void testNoWritePermissionToFolderUnixOs() throws Exception {
+        Assume.assumeTrue(SystemUtils.IS_OS_UNIX);
+
+        Path subfolderPath = Paths.get(BASE_STORE_DIRECTORY, "testNoWritePermissionToFolder");
+        try {
+            Path ksPath = subfolderPath.resolve("ks.jceks");
+            String storePassword = "storePassword";
+            createAndCheckCredentialStoreStorageFile(ksPath, storePassword);
+
+            char[] password1 = "secret-password1".toCharArray();
+            char[] password2 = "secret-password2".toCharArray();
+
+            HashMap<String, String> csAttributes = new HashMap<>();
+
+            csAttributes.put("location", ksPath.toAbsolutePath().toString());
+            csAttributes.put("keyStoreType", "JCEKS");
+
+            String passwordAlias1 = "passAlias1";
+            String passwordAlias2 = "passAlias2";
+
+            CredentialStore cs = newCredentialStoreInstance();
+            cs.initialize(csAttributes,
+                new CredentialStore.CredentialSourceProtectionParameter(
+                    IdentityCredentials.NONE.withCredential(new PasswordCredential(
+                        ClearPassword.createRaw(ClearPassword.ALGORITHM_CLEAR, storePassword.toCharArray())))));
+
+            cs.store(passwordAlias1, createCredentialFromPassword(password1));
+            cs.flush();
+            Assert.assertArrayEquals(password1,
+                getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
+
+            // change permissions
+            setReadOnlyPermissions(subfolderPath);
+
+            // this alias won't be persisted but it stays in memory CS
+            cs.store(passwordAlias2, createCredentialFromPassword(password2));
+
+            try {
+                cs.flush();
+                Assert.fail("It must fail because we don't have any write permission to folder.");
+            } catch (CredentialStoreException e) {
+                if (!"ELY09513: Unable to flush credential store to storage".equals(e.getMessage())) {
+                    throw new RuntimeException(e);
+                }
+            }
+        } finally {
+            setAllPermissions(subfolderPath);
+        }
+    }
+
+    /**
+     * After initialize Credential Store is removed backed CS file. This file won't be created again when there is added new
+     * entry to store because of no write permission to parent directory.
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testNoWritePermissionToFolderRecreatingKSTestUnixOs() throws Exception {
+        Assume.assumeTrue(SystemUtils.IS_OS_UNIX);
+
+        Path subfolderPath = Paths.get(BASE_STORE_DIRECTORY, "testNoWritePermissionToFolderRecreatingKSTest");
+        try {
+            Path ksPath = subfolderPath.resolve("ks.jceks");
+            String storePassword = "storePassword";
+            createAndCheckCredentialStoreStorageFile(ksPath, storePassword);
+
+            char[] password1 = "secret-password1".toCharArray();
+            char[] password2 = "secret-password2".toCharArray();
+
+            HashMap<String, String> csAttributes = new HashMap<>();
+
+            csAttributes.put("location", ksPath.toAbsolutePath().toString());
+            csAttributes.put("keyStoreType", "JCEKS");
+
+            String passwordAlias1 = "passAlias1";
+            String passwordAlias2 = "passAlias2";
+
+            CredentialStore cs = newCredentialStoreInstance();
+            cs.initialize(csAttributes,
+                new CredentialStore.CredentialSourceProtectionParameter(
+                    IdentityCredentials.NONE.withCredential(new PasswordCredential(
+                        ClearPassword.createRaw(ClearPassword.ALGORITHM_CLEAR, storePassword.toCharArray())))));
+
+            cs.store(passwordAlias1, createCredentialFromPassword(password1));
+            cs.store(passwordAlias2, createCredentialFromPassword(password2));
+
+            Assert.assertArrayEquals(password1, getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
+
+            if (!Files.deleteIfExists(ksPath)) {
+                Assert.fail("KeyStore [" + ksPath.toAbsolutePath() + "] delete fail");
+            }
+
+            // change permissions
+            setReadOnlyPermissions(subfolderPath);
+
+            Assert.assertArrayEquals(password1, getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
+            // load new entry (in memory)
+            Assert.assertArrayEquals(password2, getPasswordFromCredential(cs.retrieve(passwordAlias2, PasswordCredential.class)));
+
+            cs.store("abc", createCredentialFromPassword(password1));
+            try {
+                cs.flush();
+                Assert.fail("It must fail because we don't have any write permission to folder.");
+            } catch (CredentialStoreException e) {
+                if (!"ELY09513: Unable to flush credential store to storage".equals(e.getMessage())) {
+                    throw new RuntimeException(e);
+                }
+            }
+        } finally {
+            setAllPermissions(subfolderPath);
+        }
+    }
+
+    /**
+     * After initialize Credential Store is removed backed CS file and his parent folder. This file must be created again when
+     * there is added new entry to store.
+     *
+     * @throws NoSuchAlgorithmException
+     * @throws CredentialStoreException
+     * @throws UnsupportedCredentialTypeException
+     */
+    @Test
+    public void testRecreatingKSTestInNotExistsFolder() throws Exception {
+        Path subfolderPath = Paths.get(BASE_STORE_DIRECTORY, "testRecreatingKSTestInNotExistsFolder");
+        Path ksPath = subfolderPath.resolve("ks.jceks");
+        String storePassword = "storePassword";
+        createAndCheckCredentialStoreStorageFile(ksPath, storePassword);
+
+        char[] password1 = "secret-password1".toCharArray();
+        char[] password2 = "secret-password2".toCharArray();
+
+        HashMap<String, String> csAttributes = new HashMap<>();
+
+        csAttributes.put("location", ksPath.toAbsolutePath().toString());
+        csAttributes.put("keyStoreType", "JCEKS");
+
+        String passwordAlias1 = "passAlias1";
+        String passwordAlias2 = "passAlias2";
+
+        CredentialStore cs = newCredentialStoreInstance();
+        cs.initialize(csAttributes,
+            new CredentialStore.CredentialSourceProtectionParameter(
+                IdentityCredentials.NONE.withCredential(new PasswordCredential(
+                    ClearPassword.createRaw(ClearPassword.ALGORITHM_CLEAR, storePassword.toCharArray())))));
+
+        cs.store(passwordAlias1, createCredentialFromPassword(password1));
+        cs.flush();
+        Assert.assertArrayEquals(password1, getPasswordFromCredential(cs.retrieve(passwordAlias1, PasswordCredential.class)));
+
+        if (!Files.deleteIfExists(ksPath)) {
+            Assert.fail("KeyStore [" + ksPath.toAbsolutePath() + "] delete fail");
+        }
+        if (!Files.deleteIfExists(subfolderPath)) {
+            Assert.fail(String.format("Delete folder [%s] failed.", subfolderPath.toAbsolutePath()));
+        }
+
+        cs.store(passwordAlias2, createCredentialFromPassword(password2));
+        cs.flush();
+        Assert.assertArrayEquals(password2, getPasswordFromCredential(cs.retrieve(passwordAlias2, PasswordCredential.class)));
+
+        if (!Files.exists(ksPath)) {
+            Assert.fail("KeyStore [" + ksPath.toAbsolutePath() + "] must exist yet.");
+        }
     }
 
     /**
